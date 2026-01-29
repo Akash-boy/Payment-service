@@ -372,6 +372,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Spring Boot documentation
 - Kafka documentation
 - Stack Overflow community
+## 🔗 Related Services
+
+This Payment Service works together with other microservices:
+
+- **[Order Service](https://github.com/Akash-boy/Order-service)** - Handles order management and lifecycle
+- **Inventory Service** (Coming soon) - Manages product stock
+- **Analytics Service** (Coming soon) - Provides business insights
 
 ## 📊 Project Status
 
