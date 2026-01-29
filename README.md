@@ -1,12 +1,13 @@
 # 🛒 E-Commerce Microservices - Payment Service
 
-A robust payment processing microservice built with Spring Boot, featuring idempotent payment handling, event-driven architecture with Kafka, and comprehensive error management.
+[![Java](https://img.shields.io/badge/Java-17-orange?style=flat&logo=openjdk)](https://www.java.com/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.x-brightgreen?style=flat&logo=spring-boot)](https://spring.io/projects/spring-boot)
+[![Kafka](https://img.shields.io/badge/Apache%20Kafka-Enabled-black?style=flat&logo=apache-kafka)](https://kafka.apache.org/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.0-blue?style=flat&logo=mysql)](https://www.mysql.com/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/Akash-boy/Payment-service?style=social)](https://github.com/Akash-boy/Payment-service/stargazers)
 
-![Java](https://img.shields.io/badge/Java-17-orange)
-![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.x-brightgreen)
-![Kafka](https://img.shields.io/badge/Apache%20Kafka-Enabled-black)
-![MySQL](https://img.shields.io/badge/MySQL-8.0-blue)
-![Status](https://img.shields.io/badge/Status-In%20Development-yellow)
+A robust payment processing microservice built with Spring Boot, featuring idempotent payment handling, event-driven architecture with Kafka, and comprehensive error management.
 
 ## 📋 Table of Contents
 
