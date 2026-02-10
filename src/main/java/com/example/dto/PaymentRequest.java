@@ -39,4 +39,5 @@ public class PaymentRequest {
 
     // Optional: Payment gateway specific details
     private String paymentGatewayReference;
+    private String reservationId; // For linking with inventory reservation
 }
