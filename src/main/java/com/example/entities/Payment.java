@@ -49,6 +49,7 @@ public class Payment {
 
     // Payment gateway transaction ID
     private String transactionId;
+    private String reservationId; // Link to stock reservation
 
     // Payment gateway reference
     private String gatewayReference;

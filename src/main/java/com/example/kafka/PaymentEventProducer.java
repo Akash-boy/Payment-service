@@ -2,6 +2,7 @@ package com.example.kafka;
 
 import com.example.dto.PaymentCompletedEvent;
 import com.example.dto.PaymentInitiatedEvent;
+import com.example.dto.RefundProcessedEvent;
 import com.example.entities.Payment;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -9,7 +10,6 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
-
 @Component
 @Slf4j
 public class PaymentEventProducer {
@@ -24,14 +24,12 @@ public class PaymentEventProducer {
         this.paymentEventsTopic = paymentEventsTopic;
     }
 
-    /**
-     * Publish PaymentInitiated event
-     */
     public void publishPaymentInitiated(Payment payment) {
         log.info("Publishing PaymentInitiated event for payment: {}", payment.getId());
 
         PaymentInitiatedEvent event = PaymentInitiatedEvent.builder()
                 .paymentId(payment.getId())
+                .reservationId(payment.getReservationId()) // ✅ now String → String, no type mismatch
                 .orderId(payment.getOrderId())
                 .amount(payment.getAmount())
                 .paymentMethod(payment.getPaymentMethod())
@@ -39,47 +37,42 @@ public class PaymentEventProducer {
                 .eventType("PAYMENT_INITIATED")
                 .build();
 
-        kafkaTemplate.send(paymentEventsTopic, "PAYMENT_INITIATED", event);
-
+        kafkaTemplate.send(paymentEventsTopic, String.valueOf(payment.getOrderId()), event); // ✅ use orderId as key
         log.info("PaymentInitiated event published for payment: {}", payment.getId());
     }
 
-    /**
-     * Publish PaymentCompleted event
-     * This triggers stock confirmation in Inventory Service
-     */
     public void publishPaymentCompleted(Payment payment, String reservationId) {
-        log.info("Publishing PaymentCompleted event for payment: {}, status: {}",
-                payment.getId(), payment.getStatus());
+        log.info("Publishing PaymentCompleted event for payment: {}", payment.getId());
 
         PaymentCompletedEvent event = PaymentCompletedEvent.builder()
                 .paymentId(payment.getId())
                 .orderId(payment.getOrderId())
                 .userId(payment.getUserId())
                 .amount(payment.getAmount())
-                .status(payment.getStatus().toString()) // "SUCCESS" or "FAILED"
+                .status(payment.getStatus().toString())
                 .reservationId(reservationId)
                 .transactionId(payment.getTransactionId())
                 .completedAt(payment.getCompletedAt())
                 .eventType("PAYMENT_COMPLETED")
                 .build();
 
-        kafkaTemplate.send(paymentEventsTopic, "PAYMENT_COMPLETED", event);
-
+        kafkaTemplate.send(paymentEventsTopic, String.valueOf(payment.getOrderId()), event);
         log.info("PaymentCompleted event published for order: {}", payment.getOrderId());
     }
 
-    /**
-     * Publish RefundProcessed event
-     */
     public void publishRefundProcessed(Payment payment) {
         log.info("Publishing RefundProcessed event for payment: {}", payment.getId());
 
-        String event = String.format(
-                "{\"paymentId\": %d, \"orderId\": %d, \"amount\": %.2f, \"eventType\": \"REFUND_PROCESSED\"}",
-                payment.getId(), payment.getOrderId(), payment.getAmount()
-        );
+        // ✅ Build a proper object — never String.format JSON
+        RefundProcessedEvent event = RefundProcessedEvent.builder()
+                .paymentId(payment.getId())
+                .orderId(payment.getOrderId())
+                .amount(payment.getAmount())
+                .eventType("REFUND_PROCESSED")
+                .processedAt(LocalDateTime.now())
+                .build();
 
-        kafkaTemplate.send(paymentEventsTopic, "REFUND_PROCESSED", event);
+        kafkaTemplate.send(paymentEventsTopic, String.valueOf(payment.getOrderId()), event);
+        log.info("RefundProcessed event published for payment: {}", payment.getId());
     }
 }

@@ -1,12 +1,12 @@
 package com.example.dto;
 
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Data
@@ -14,12 +14,13 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class PaymentInitiatedEvent {
-    private Long paymentId;
-    private String reservationId;
+public class StockConfirmedEvent {
+
+    private String eventType = "STOCK_CONFIRMED";   // consumer can filter on this
+
     private Long orderId;
-    private BigDecimal amount;
-    private String paymentMethod;
-    private LocalDateTime initiatedAt;
-    private String eventType; // "PAYMENT_INITIATED"
+    private Long productId;
+    private String reservationId;
+    private Integer quantity;
+    private LocalDateTime confirmedAt;              // copied FROM the entity after save
 }

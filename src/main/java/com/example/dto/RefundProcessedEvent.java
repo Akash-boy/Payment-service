@@ -14,12 +14,10 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class PaymentInitiatedEvent {
+public class RefundProcessedEvent {
     private Long paymentId;
-    private String reservationId;
     private Long orderId;
     private BigDecimal amount;
-    private String paymentMethod;
-    private LocalDateTime initiatedAt;
-    private String eventType; // "PAYMENT_INITIATED"
+    private String eventType;
+    private LocalDateTime processedAt;
 }

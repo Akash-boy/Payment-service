@@ -36,130 +36,138 @@ public class PaymentService {
     private final InventoryServiceClient inventoryServiceClient;
 
     /**
-     * Automatic Initiation Triggered by Inventory Reservation Event
+     * Step 1 of saga — triggered by STOCK_RESERVED event
+     * Creates PENDING payment and publishes PAYMENT_INITIATED
      */
     @Transactional
     public Payment initiatePaymentForOrder(Long orderId, String reservationId) {
         log.info("Auto-initiating payment for order: {} with reservation: {}", orderId, reservationId);
 
-        // 1. Idempotency Check for the Order
         return paymentRepository.findByOrderId(orderId)
                 .map(existing -> {
-                    log.warn("Payment already exists for order: {}. Status: {}", orderId, existing.getStatus());
+                    log.warn("Payment already exists for order: {}. Status: {}",
+                            orderId, existing.getStatus());
                     return existing;
                 })
                 .orElseGet(() -> {
-                    // 2. Fetch Context from other Microservices
+                    // 1. Fetch order details
                     OrderDetailsResponse orderDetails = orderServiceClient.getOrderDetails(orderId);
+
+                    // 2. Validate stock is still active
                     validateStockStatus(orderId);
 
-                    // 3. Map to Request DTO for unified processing
-                    PaymentRequest request = PaymentRequest.builder()
+                    // 3. Idempotency key
+                    String idempotencyKey = UUID.randomUUID().toString();
+
+                    // 4. Check duplicate
+                    paymentRepository.findByIdempotencyKey(idempotencyKey)
+                            .ifPresent(p -> {
+                                throw new DuplicatePaymentException("Payment already processed", p.getId());
+                            });
+
+                    validateAmount(orderDetails.getTotalAmount());
+
+                    // 5. Save PENDING payment
+                    Payment payment = Payment.builder()
                             .orderId(orderId)
                             .userId(orderDetails.getUserId())
                             .amount(orderDetails.getTotalAmount())
-                            .paymentMethod("CREDIT_CARD") // Default or fetched from Order metadata
-                            .idempotencyKey(UUID.randomUUID().toString())
+                            .paymentMethod("CREDIT_CARD")
+                            .status(PaymentStatus.PENDING)
+                            .idempotencyKey(idempotencyKey)
+                            .reservationId(reservationId)   // ✅ saved to entity
+                            .retryCount(0)
                             .build();
 
-                    return processPayment(request);
+                    payment = paymentRepository.save(payment);
+
+                    // 6. Publish PAYMENT_INITIATED — gateway NOT called yet
+                    paymentEventProducer.publishPaymentInitiated(payment);
+                    log.info("PaymentInitiated published for order: {}", orderId);
+
+                    return payment;
                 });
     }
 
     /**
-     * Core Payment Logic with Gateway Integration and Idempotency
+     * Step 2 of saga — triggered by STOCK_CONFIRMED event
+     * Calls gateway and publishes PAYMENT_COMPLETED
      */
-    @Transactional
-    public Payment processPayment(PaymentRequest request) {
-        log.info("Processing payment for order: {}, idempotency key: {}",
-                request.getOrderId(), request.getIdempotencyKey());
+    public void completePayment(Long orderId, String reservationId) {
+        log.info("Completing payment for order: {} after stock confirmed", orderId);
 
-        // Check for duplicate payment using idempotency key with Pessimistic Lock
-        paymentRepository.findByIdempotencyKeyWithLock(request.getIdempotencyKey())
-                .ifPresent(p -> {
-                    throw new DuplicatePaymentException("Payment already processed", p.getId());
-                });
+        Payment payment = paymentRepository.findByOrderId(orderId)
+                .orElseThrow(() -> new PaymentException("Payment not found for order: " + orderId));
 
-        validatePaymentRequest(request);
-
-        // Create initial PENDING record
-        Payment payment = Payment.builder()
-                .orderId(request.getOrderId())
-                .userId(request.getUserId())
-                .amount(request.getAmount())
-                .paymentMethod(request.getPaymentMethod())
-                .status(PaymentStatus.PENDING)
-                .idempotencyKey(request.getIdempotencyKey())
-                .retryCount(0)
-                .build();
-
-        payment = paymentRepository.save(payment);
+        // Idempotency guard
+        if (payment.getStatus() != PaymentStatus.PENDING) {
+            log.warn("Payment for order: {} already in status: {}, skipping",
+                    orderId, payment.getStatus());
+            return;
+        }
 
         try {
-            payment.setStatus(PaymentStatus.PROCESSING);
-            paymentRepository.saveAndFlush(payment);
+            PaymentRequest request = PaymentRequest.builder()
+                    .orderId(payment.getOrderId())
+                    .userId(payment.getUserId())
+                    .amount(payment.getAmount())
+                    .paymentMethod(payment.getPaymentMethod())
+                    .idempotencyKey(payment.getIdempotencyKey())
+                    .reservationId(reservationId)
+                    .build();
 
-            // Call external Gateway (Stripe, Razorpay, etc.)
             PaymentGatewayResponse gatewayResponse = paymentGateway.processPayment(request);
 
             if (gatewayResponse.isSuccess()) {
-                handleSuccess(payment, gatewayResponse);
+                payment.setStatus(PaymentStatus.SUCCESS);
+                payment.setTransactionId(gatewayResponse.getTransactionId());
+                payment.setGatewayReference(gatewayResponse.getGatewayReference());
+                payment.setCompletedAt(LocalDateTime.now());
+                log.info("✅ Payment successful for order: {}", orderId);
             } else {
-                handleFailure(payment, gatewayResponse.getMessage());
+                payment.setStatus(PaymentStatus.FAILED);
+                payment.setFailureReason(gatewayResponse.getMessage());
+                payment.setCompletedAt(LocalDateTime.now());
+                log.error("❌ Payment failed for order: {}, reason: {}",
+                        orderId, gatewayResponse.getMessage());
             }
 
         } catch (Exception e) {
-            log.error("Technical error processing payment for order: {}", request.getOrderId(), e);
-            handleFailure(payment, "Technical Error: " + e.getMessage());
-            // Rethrowing is optional depending on whether you want to retry the transaction
-            throw new PaymentException("Payment failed due to system error", e);
+            log.error("Technical error completing payment for order: {}", orderId, e);
+            payment.setStatus(PaymentStatus.FAILED);
+            payment.setFailureReason("Technical Error: " + e.getMessage());
+            payment.setCompletedAt(LocalDateTime.now());
         }
 
-        publishPaymentEvent(payment, request.getReservationId());
-        return payment;
+        // Save final status
+        payment = paymentRepository.save(payment);
+
+        // Publish PAYMENT_COMPLETED — order service marks order complete
+        paymentEventProducer.publishPaymentCompleted(payment, reservationId);
+        log.info("PaymentCompleted published for order: {}", orderId);
     }
 
-    private void handleSuccess(Payment payment, PaymentGatewayResponse response) {
-        payment.setStatus(PaymentStatus.SUCCESS);
-        payment.setTransactionId(response.getTransactionId());
-        payment.setGatewayReference(response.getGatewayReference());
-        payment.setCompletedAt(LocalDateTime.now());
-        paymentRepository.save(payment);
-        log.info("✅ Payment Successful: OrderId={}, PaymentId={}", payment.getOrderId(), payment.getId());
-    }
-
-    private void handleFailure(Payment payment, String reason) {
-        payment.setStatus(PaymentStatus.FAILED);
-        payment.setFailureReason(reason);
-        payment.setCompletedAt(LocalDateTime.now());
-        paymentRepository.save(payment);
-        log.error("❌ Payment Failed for Order {}: {}", payment.getOrderId(), reason);
-    }
+    // --- Supporting methods ---
 
     private void validateStockStatus(Long orderId) {
         try {
-            StockReservationResponse reservation = inventoryServiceClient.getReservationByOrderId(orderId);
+            StockReservationResponse reservation =
+                    inventoryServiceClient.getReservationByOrderId(orderId);
             if (!"ACTIVE".equals(reservation.getStatus())) {
-                throw new PaymentValidationException("Inventory reservation is not ACTIVE. Current status: " + reservation.getStatus());
+                throw new PaymentValidationException(
+                        "Inventory reservation is not ACTIVE. Current status: "
+                                + reservation.getStatus());
             }
+        } catch (PaymentValidationException e) {
+            throw e; // rethrow validation errors
         } catch (Exception e) {
-            log.warn("Could not verify reservation status for order {}, proceeding with caution", orderId);
+            log.warn("Could not verify reservation for order {}, proceeding with caution", orderId);
         }
     }
 
-    private void validatePaymentRequest(PaymentRequest request) {
-        if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+    private void validateAmount(BigDecimal amount) {
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
             throw new PaymentValidationException("Payment amount must be positive");
-        }
-    }
-
-    private void publishPaymentEvent(Payment payment, String reservationId) {
-        try {
-            // Using the specialized producer to notify Inventory and Order services
-            paymentEventProducer.publishPaymentCompleted(payment,reservationId);
-            log.info("Published Kafka event for payment status: {}", payment.getStatus());
-        } catch (Exception e) {
-            log.error("Failed to publish Kafka event for payment ID: {}", payment.getId(), e);
         }
     }
 
@@ -171,5 +179,27 @@ public class PaymentService {
 
     public Page<Payment> getPaymentsByUserId(Long userId, Pageable pageable) {
         return paymentRepository.findByUserId(userId, pageable);
+    }
+
+    public Optional<Payment> getPaymentById(Long paymentId) {
+        return paymentRepository.findById(paymentId);
+    }
+
+    public Payment refundPayment(Long paymentId, BigDecimal amount) throws Exception {
+        Payment payment = paymentRepository.findById(paymentId)
+                .orElseThrow(() -> new Exception("Payment not found with ID: " + paymentId));
+
+        PaymentGatewayResponse refundResponse =
+                paymentGateway.refundPayment(payment.getTransactionId(), amount);
+
+        if (refundResponse.isSuccess()) {
+            payment.setStatus(PaymentStatus.REFUNDED);
+            paymentRepository.save(payment);
+            log.info("Payment refunded: PaymentId={}, Amount={}", paymentId, amount);
+        } else {
+            log.error("Refund failed: PaymentId={}, Reason={}", paymentId, refundResponse.getMessage());
+            throw new Exception("Refund failed: " + refundResponse.getMessage());
+        }
+        return payment;
     }
 }

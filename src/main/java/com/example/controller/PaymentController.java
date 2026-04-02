@@ -29,7 +29,7 @@ public class PaymentController {
     @PostMapping
     public ResponseEntity<Payment> makePayment(@Valid @RequestBody PaymentRequest request) {
         log.info("Received payment request for order: {}", request.getOrderId());
-        Payment payment = paymentService.processPayment(request);
+        Payment payment = paymentService.initiatePaymentForOrder(request.getOrderId(), request.getReservationId());
         return ResponseEntity.status(HttpStatus.CREATED).body(payment);
     }
 
@@ -88,7 +88,7 @@ public class PaymentController {
     @PostMapping("/{paymentId}/refund")
     public ResponseEntity<Payment> refundPayment(
             @PathVariable("paymentId") Long paymentId,
-            @Valid @RequestBody RefundRequest refundRequest) {
+            @Valid @RequestBody RefundRequest refundRequest) throws Exception {
 
         log.info("Processing refund for payment ID: {}, amount: {}",
                 paymentId, refundRequest.getAmount());
