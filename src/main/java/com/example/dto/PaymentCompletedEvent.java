@@ -21,5 +21,6 @@ public class PaymentCompletedEvent {
     private String reservationId; // For inventory to confirm stock
     private String transactionId;
     private LocalDateTime completedAt;
+    private String failureReason; // Populated if status is "FAILED"
     private String eventType; // "PAYMENT_COMPLETED"
 }

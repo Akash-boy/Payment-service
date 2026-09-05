@@ -54,6 +54,7 @@ public class PaymentEventProducer {
                 .transactionId(payment.getTransactionId())
                 .completedAt(payment.getCompletedAt())
                 .eventType("PAYMENT_COMPLETED")
+                .failureReason(payment.getFailureReason()) // ✅ include failure reason if any
                 .build();
 
         kafkaTemplate.send(paymentEventsTopic, String.valueOf(payment.getOrderId()), event);

@@ -1,5 +1,7 @@
 package com.example.service;
-
+import org.springframework.cache.CacheManager;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import com.example.client.InventoryServiceClient;
 import com.example.client.OrderServiceClient;
 import com.example.dto.OrderDetailsResponse;
@@ -34,6 +36,7 @@ public class PaymentService {
     private final PaymentGateway paymentGateway;
     private final OrderServiceClient orderServiceClient;
     private final InventoryServiceClient inventoryServiceClient;
+    private final CacheManager cacheManager;
 
     /**
      * Step 1 of saga — triggered by STOCK_RESERVED event
@@ -98,6 +101,11 @@ public class PaymentService {
 
         Payment payment = paymentRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new PaymentException("Payment not found for order: " + orderId));
+
+
+        // Evict now that we know the paymentId — before any early returns
+        cacheManager.getCache("paymentsById").evict(payment.getId());
+        cacheManager.getCache("paymentsByOrderId").evict(orderId);
 
         // Idempotency guard
         if (payment.getStatus() != PaymentStatus.PENDING) {
@@ -172,7 +180,7 @@ public class PaymentService {
     }
 
     // --- Read Operations ---
-
+@Cacheable(value = "payments", key = "#p0")
     public Optional<Payment> getPaymentByOrderId(Long orderId) {
         return paymentRepository.findByOrderId(orderId);
     }
@@ -180,7 +188,7 @@ public class PaymentService {
     public Page<Payment> getPaymentsByUserId(Long userId, Pageable pageable) {
         return paymentRepository.findByUserId(userId, pageable);
     }
-
+    @Cacheable(value = "payments", key = "#p0")
     public Optional<Payment> getPaymentById(Long paymentId) {
         return paymentRepository.findById(paymentId);
     }
@@ -196,6 +204,9 @@ public class PaymentService {
             payment.setStatus(PaymentStatus.REFUNDED);
             paymentRepository.save(payment);
             log.info("Payment refunded: PaymentId={}, Amount={}", paymentId, amount);
+
+            cacheManager.getCache("paymentsById").evict(paymentId);
+            cacheManager.getCache("paymentsByOrderId").evict(payment.getOrderId());
         } else {
             log.error("Refund failed: PaymentId={}, Reason={}", paymentId, refundResponse.getMessage());
             throw new Exception("Refund failed: " + refundResponse.getMessage());

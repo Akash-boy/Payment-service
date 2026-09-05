@@ -1,18 +1,20 @@
 # 🛒 E-Commerce Microservices - Payment Service
 
-A robust payment processing microservice built with Spring Boot, featuring idempotent payment handling, event-driven architecture with Kafka, and comprehensive error management.
+[![Java](https://img.shields.io/badge/Java-21-orange?style=flat&logo=openjdk)](https://www.java.com/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.0.1-brightgreen?style=flat&logo=spring-boot)](https://spring.io/projects/spring-boot)
+[![Kafka](https://img.shields.io/badge/Apache%20Kafka-Enabled-black?style=flat&logo=apache-kafka)](https://kafka.apache.org/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.3-blue?style=flat&logo=mysql)](https://www.mysql.com/)
+[![Redis](https://img.shields.io/badge/Redis-7.2-red?style=flat&logo=redis)](https://redis.io/)
+![Status](https://img.shields.io/badge/Status-Core%20Complete-brightgreen)
 
-![Java](https://img.shields.io/badge/Java-17-orange)
-![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.x-brightgreen)
-![Kafka](https://img.shields.io/badge/Apache%20Kafka-Enabled-black)
-![MySQL](https://img.shields.io/badge/MySQL-8.0-blue)
-![Status](https://img.shields.io/badge/Status-In%20Development-yellow)
+A robust payment processing microservice built with Spring Boot, implementing a saga-style payment flow, idempotent payment handling, Redis-backed caching, and event-driven communication with Kafka.
 
 ## 📋 Table of Contents
 
 - [Overview](#overview)
 - [Features](#features)
 - [Architecture](#architecture)
+- [Caching Strategy](#caching-strategy)
 - [Tech Stack](#tech-stack)
 - [Getting Started](#getting-started)
 - [API Documentation](#api-documentation)
@@ -23,23 +25,24 @@ A robust payment processing microservice built with Spring Boot, featuring idemp
 
 ## 🎯 Overview
 
-This is the **Payment Service** component of a larger e-commerce microservices ecosystem. It handles payment processing, refunds, payment history, and publishes payment events to Kafka for downstream services.
+This is the **Payment Service** component of a larger e-commerce microservices ecosystem. It handles payment initiation and completion as part of a saga (triggered by stock-reservation events), refunds, payment history, and publishes payment events to Kafka for downstream services.
 
 **Part of E-Commerce Microservices Suite:**
-- ✅ Order Service
+- ✅ [Order Service](https://github.com/Akash-boy/Order-service)
 - ✅ Payment Service (This repository)
-- 🚧 Inventory Service (Coming soon)
-- 🚧 Analytics Service (Coming soon)
+- ✅ [Inventory Service](https://github.com/Akash-boy/Inventory-service)
+- ✅ [Analytics Service](https://github.com/Akash-boy/analytical_service.git)
 
 ## ✨ Features
 
 ### Core Features
+- ✅ **Saga-Based Payment Flow** - `PENDING` payment created on `STOCK_RESERVED`, gateway called and finalized on `STOCK_CONFIRMED`
 - ✅ **Idempotent Payment Processing** - Prevents duplicate payments using idempotency keys
-- ✅ **Multiple Payment Methods** - Credit Card, Debit Card, UPI, Net Banking, Wallet
-- ✅ **Payment Status Tracking** - Real-time payment status updates
-- ✅ **Refund Management** - Full and partial refunds with validation
+- ✅ **Payment Status Tracking** - PENDING / SUCCESS / FAILED / REFUNDED
+- ✅ **Refund Management** - Refunds with reason tracking, validated against the payment gateway response
 - ✅ **Payment History** - Paginated payment history per user
-- ✅ **Event-Driven Architecture** - Kafka integration for asynchronous communication
+- ✅ **Event-Driven Architecture** - Kafka integration (`PaymentInitiated`, `PaymentCompleted`)
+- ✅ **Redis Caching** - Payment lookups cached by both order ID and payment ID
 
 ### Technical Features
 - ✅ **Comprehensive Validation** - Bean validation with custom business rules
@@ -47,15 +50,19 @@ This is the **Payment Service** component of a larger e-commerce microservices e
 - ✅ **Transaction Management** - ACID compliance for payment operations
 - ✅ **Logging & Monitoring** - Detailed logging with SLF4J
 - ✅ **RESTful API Design** - Clean, intuitive API endpoints
-- ✅ **Database Indexing** - Optimized queries for performance
+- ✅ **Database Indexing** - Indexes on `orderId`, `userId`, `idempotencyKey`, `status`
 
 ## 🏗️ Architecture
 ```
 ┌─────────────┐      ┌──────────────────┐      ┌─────────────┐
 │   Client    │─────▶│ Payment Service  │─────▶│   MySQL     │
 └─────────────┘      └──────────────────┘      └─────────────┘
-                              │
-                              │ publishes events
+                              │      │
+                    publishes │      │ read-through
+                       events │      ▼ cache
+                              │  ┌─────────┐
+                              │  │  Redis  │
+                              │  └─────────┘
                               ▼
                      ┌──────────────────┐
                      │  Apache Kafka    │
@@ -69,30 +76,49 @@ This is the **Payment Service** component of a larger e-commerce microservices e
                      └──────────────────┘
 ```
 
-### Payment Processing Flow
+### Payment Saga Flow
 ```
-1. Client sends payment request with idempotency key
-2. Service checks for duplicate using idempotency key
-3. If duplicate → Return existing payment (409 Conflict)
-4. If new → Create payment record (Status: PENDING)
-5. Process through Payment Gateway
-6. Update payment status (SUCCESS/FAILED)
-7. Publish event to Kafka
-8. Return response to client
+1. Inventory Service reserves stock → publishes STOCK_RESERVED
+2. Payment Service consumes it → creates PENDING payment, publishes PAYMENT_INITIATED
+3. Inventory Service confirms stock → publishes STOCK_CONFIRMED
+4. Payment Service consumes it → calls Payment Gateway
+5. On success: status → SUCCESS, transactionId + gatewayReference saved
+   On failure: status → FAILED, failureReason saved
+6. Publishes PAYMENT_COMPLETED — Order Service marks the order complete/failed
 ```
+
+## 🔴 Caching Strategy
+
+Payment Service uses Spring's `@Cacheable` backed by Redis, with **two separate caches** rather than one shared cache:
+
+| Cache | Method | Key |
+|---|---|---|
+| `paymentsByOrderId` | `getPaymentByOrderId(orderId)` | `orderId` |
+| `paymentsById` | `getPaymentById(paymentId)` | `paymentId` |
+
+**Why two caches, not one:** `orderId` and `paymentId` are separate ID spaces that both start counting from 1 — using a single shared cache keyed by whichever ID happened to be passed in would let `getPaymentById(5)` return the payment for **order** 5 instead, silently, with no error. Keeping them in separate cache namespaces makes that collision impossible.
+
+**Eviction — annotation where possible, programmatic where not:**
+- `refundPayment(paymentId, amount)` evicts `paymentsById` by `paymentId` directly, but has to evict `paymentsByOrderId` **programmatically** via an injected `CacheManager`, since `orderId` isn't a parameter of that method — it's only known after fetching the `Payment` entity.
+- `completePayment(orderId, reservationId)` is the mirror case: evicts `paymentsByOrderId` by `orderId` directly, and evicts `paymentsById` programmatically once the payment's own ID is known.
+
+**A build note worth mentioning:** named SpEL cache keys (`key = "#paymentId"`) failed at runtime here with *"Null key returned... ensure the compiler uses the '-parameters' flag"* — this project's Gradle build wasn't compiling with that flag. Rather than fight the build config, the keys use positional SpEL references (`#p0`) instead, which don't depend on the compiler preserving parameter names.
+
+**TTL:** 10 minutes, same as the rest of the suite.
 
 ## 🛠️ Tech Stack
 
 | Technology | Version | Purpose |
 |------------|---------|---------|
-| Java | 17 | Programming Language |
-| Spring Boot | 3.x | Application Framework |
-| Spring Data JPA | 3.x | Database Access |
-| Hibernate | 6.x | ORM Framework |
-| MySQL | 8.0 | Relational Database |
-| Apache Kafka | 3.x | Message Broker |
+| Java | 21 | Programming Language |
+| Spring Boot | 4.0.1 | Application Framework |
+| Spring Data JPA | 4.x | Database Access |
+| Hibernate | 7.x | ORM Framework |
+| MySQL | 8.3 | Relational Database |
+| Apache Kafka | 7.4.4 (KRaft mode) | Message Broker |
+| Redis | 7.2 | Caching Layer |
 | Lombok | 1.18.x | Boilerplate Reduction |
-| Maven | 3.8+ | Build Tool |
+| Gradle | 8.x | Build Tool |
 | SLF4J + Logback | Latest | Logging |
 
 ## 🚀 Getting Started
@@ -100,173 +126,104 @@ This is the **Payment Service** component of a larger e-commerce microservices e
 ### Prerequisites
 ```bash
 # Required
-- Java 17 or higher
-- Maven 3.8+
-- MySQL 8.0+
-- Apache Kafka 3.x (or Docker)
+- Java 21 or higher
+- Gradle 8.x (or use the included ./gradlew wrapper)
+- Docker Desktop (for MySQL, Kafka, Redis)
 
 # Recommended
-- IntelliJ IDEA / Eclipse
+- IntelliJ IDEA
 - Postman (for API testing)
-- Docker Desktop
 ```
 
 ### Installation
 
 #### 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/payment-service.git
-cd payment-service
+git clone https://github.com/Akash-boy/Payment-service.git
+cd Payment-service
 ```
 
-#### 2. Configure Database
-
-Create MySQL database:
-```sql
-CREATE DATABASE payment_service;
-```
-
-Update `src/main/resources/application.properties`:
-```properties
-# Database Configuration
-spring.datasource.url=jdbc:mysql://localhost:3306/payment_service
-spring.datasource.username=your_username
-spring.datasource.password=your_password
-
-# JPA Configuration
-spring.jpa.hibernate.ddl-auto=update
-spring.jpa.show-sql=true
-
-# Kafka Configuration
-spring.kafka.bootstrap-servers=localhost:9092
-spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
-spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JsonSerializer
-```
-
-#### 3. Start Kafka (using Docker)
+#### 2. Start Infrastructure
 ```bash
-# Start Zookeeper
-docker run -d --name zookeeper -p 2181:2181 zookeeper
+docker compose up -d
+```
 
-# Start Kafka
-docker run -d --name kafka -p 9092:9092 \
-  --link zookeeper \
-  -e KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181 \
-  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
-  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
-  confluentinc/cp-kafka
+#### 3. Configure Database
+
+`src/main/resources/application.properties`:
+```properties
+spring.datasource.url=jdbc:mysql://localhost:3306/ecommerce_db
+spring.datasource.username=root
+spring.datasource.password=password
+
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+spring.cache.type=redis
+spring.cache.redis.time-to-live=600000
 ```
 
 #### 4. Build & Run
 ```bash
-# Build the project
-mvn clean install
-
-# Run the application
-mvn spring-boot:run
-
-# Or run the JAR
-java -jar target/payment-service-0.0.1-SNAPSHOT.jar
+./gradlew clean build
+./gradlew bootRun
 ```
 
-The service will start on `http://localhost:8080`
+The service starts on `http://localhost:9090`
 
 ### Quick Test
 ```bash
 # Health check
-curl http://localhost:8080/actuator/health
+curl http://localhost:9090/actuator/health
 
-# Create a test payment
-curl -X POST http://localhost:8080/api/v1/payments \
+# Fetch a payment by ID twice — second call served from Redis
+curl http://localhost:9090/api/v1/payments/1
+curl http://localhost:9090/api/v1/payments/1
+
+# Confirm in Redis
+docker exec -it redis redis-cli KEYS "payments*"
+
+# Refund a payment
+curl -X POST http://localhost:9090/api/v1/payments/1/refund \
   -H "Content-Type: application/json" \
-  -d '{
-    "orderId": 1,
-    "userId": 1,
-    "amount": 100.50,
-    "paymentMethod": "CREDIT_CARD",
-    "idempotencyKey": "unique-key-12345"
-  }'
+  -d '{ "amount": 100.00, "reason": "Customer requested refund" }'
 ```
 
 ## 📚 API Documentation
 
 ### Base URL
 ```
-http://localhost:8080/api/v1/payments
+http://localhost:9090/api/v1/payments
 ```
 
 ### Endpoints
 
-#### 1. Create Payment
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/` | Manually trigger payment initiation for an order |
+| GET | `/order/{orderId}` | Get payment by order ID *(cached)* |
+| GET | `/{paymentId}` | Get payment by payment ID *(cached)* |
+| GET | `/user/{userId}` | Get paginated payment history for a user |
+| POST | `/{paymentId}/refund` | Refund a payment *(evicts both caches)* |
+
+#### Refund a Payment
 ```http
-POST /api/v1/payments
-Content-Type: application/json
-
-{
-  "orderId": 123,
-  "userId": 456,
-  "amount": 250.00,
-  "paymentMethod": "CREDIT_CARD",
-  "idempotencyKey": "unique-uuid-here"
-}
-```
-
-**Response (201 Created):**
-```json
-{
-  "id": 1,
-  "orderId": 123,
-  "userId": 456,
-  "amount": 250.00,
-  "paymentMethod": "CREDIT_CARD",
-  "status": "SUCCESS",
-  "transactionId": "txn_abc123",
-  "createdAt": "2026-01-28T10:30:00"
-}
-```
-
-#### 2. Get Payment by Order ID
-```http
-GET /api/v1/payments/order/{orderId}
-```
-
-#### 3. Get User Payment History (Paginated)
-```http
-GET /api/v1/payments/user/{userId}?page=0&size=10&sortBy=createdAt&sortDirection=DESC
-```
-
-**Response:**
-```json
-{
-  "content": [ /* array of payments */ ],
-  "totalPages": 3,
-  "totalElements": 25,
-  "number": 0,
-  "size": 10
-}
-```
-
-#### 4. Refund Payment
-```http
-POST /api/v1/payments/{paymentId}/refund
+POST /api/v1/payments/1/refund
 Content-Type: application/json
 
 {
   "amount": 100.00,
-  "reason": "Customer request"
+  "reason": "Customer requested refund"
 }
 ```
 
-### Error Responses
+**Response (200 OK):**
 ```json
 {
-  "timestamp": "2026-01-28T10:30:45",
-  "status": 400,
-  "error": "Validation Failed",
-  "message": "Invalid input parameters",
-  "details": {
-    "amount": "Amount must be greater than 0"
-  }
+  "id": 1,
+  "orderId": 123,
+  "status": "REFUNDED",
+  "amount": 250.00,
+  "transactionId": "txn_abc123"
 }
 ```
 
@@ -276,85 +233,67 @@ payment-service/
 ├── src/
 │   ├── main/
 │   │   ├── java/com/example/
-│   │   │   ├── controller/          # REST Controllers
+│   │   │   ├── controller/
 │   │   │   │   └── PaymentController.java
-│   │   │   ├── service/             # Business Logic
+│   │   │   ├── service/
 │   │   │   │   └── PaymentService.java
-│   │   │   ├── repository/          # Data Access Layer
+│   │   │   ├── repository/
 │   │   │   │   └── PaymentRepository.java
-│   │   │   ├── entities/            # JPA Entities
+│   │   │   ├── entities/
 │   │   │   │   ├── Payment.java
 │   │   │   │   └── PaymentStatus.java
-│   │   │   ├── dto/                 # Data Transfer Objects
+│   │   │   ├── dto/
 │   │   │   │   ├── PaymentRequest.java
 │   │   │   │   └── RefundRequest.java
-│   │   │   ├── exception/           # Custom Exceptions
-│   │   │   │   ├── PaymentException.java
-│   │   │   │   ├── DuplicatePaymentException.java
-│   │   │   │   ├── GlobalExceptionHandler.java
-│   │   │   │   └── ErrorResponse.java
-│   │   │   ├── gateway/             # Payment Gateway Integration
+│   │   │   ├── config/
+│   │   │   │   └── RedisConfig.java
+│   │   │   ├── gateway/
 │   │   │   │   ├── PaymentGateway.java
-│   │   │   │   ├── PaymentGatewayResponse.java
-│   │   │   │   └── impl/
-│   │   │   │       └── MockPaymentGateway.java
-│   │   │   └── eventProducer/       # Kafka Producers
+│   │   │   │   └── PaymentGatewayResponse.java
+│   │   │   ├── client/
+│   │   │   │   ├── OrderServiceClient.java
+│   │   │   │   └── InventoryServiceClient.java
+│   │   │   ├── exception/
+│   │   │   └── kafka/
 │   │   │       └── PaymentEventProducer.java
 │   │   └── resources/
-│   │       ├── application.properties
-│   │       └── application-dev.properties
-│   └── test/                        # Unit & Integration Tests
+│   │       └── application.properties
+│   └── test/
 ├── .gitignore
-├── pom.xml
+├── build.gradle
 ├── README.md
-├── LICENSE
-└── CONTRIBUTING.md
+└── LICENSE
 ```
 
 ## 🎯 Future Enhancements
 
-### Planned Features
-- [ ] Integration with real payment gateways (Stripe, Razorpay)
+- [ ] Integration with a real payment gateway (Stripe, Razorpay) — currently uses a mock gateway
 - [ ] Retry mechanism for failed payments with exponential backoff
 - [ ] Circuit breaker pattern using Resilience4j
-- [ ] Payment analytics dashboard
 - [ ] Webhook endpoints for payment gateway callbacks
-- [ ] Multi-currency support
-- [ ] Payment fraud detection
-- [ ] Docker containerization
-- [ ] Kubernetes deployment manifests
-- [ ] Comprehensive integration tests
-- [ ] API rate limiting
+- [ ] Docker containerization of the app itself
+- [ ] Deployment to AWS free tier (EC2 + RDS)
 - [ ] OpenAPI/Swagger documentation
 
 ### Learning Goals
 This project is built to learn and demonstrate:
 - ✅ Microservices architecture
+- ✅ Saga pattern for distributed transactions
 - ✅ Event-driven design with Kafka
-- ✅ RESTful API best practices
-- ✅ Database optimization
-- ✅ Error handling strategies
+- ✅ Redis caching with multiple keyspaces + programmatic eviction via `CacheManager`
+- ✅ Idempotency and error handling strategies
 - 🚧 Container orchestration
 - 🚧 CI/CD pipelines
-- 🚧 Distributed tracing
 
 ## 🤝 Contributing
 
-Contributions are welcome! This is a learning project, and I'm open to suggestions and improvements.
-
-### How to Contribute
+Contributions are welcome! This is a learning project.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+3. Commit your changes (`git commit -m 'Add AmazingFeature'`)
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
-
-### Code Style
-- Follow Java naming conventions
-- Add comments for complex logic
-- Write unit tests for new features
-- Update README if adding new features
 
 ## 📝 License
 
@@ -362,28 +301,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 👨‍💻 Author
 
-**Animesh**
-- GitHub: [Akash-boy](https://github.com/Akash-boy)
-- Email: akashzaminder@gmail.com
-
-## 🙏 Acknowledgments
-
-- Spring Boot documentation
-- Kafka documentation
-- Stack Overflow community
+**Akash**
+- GitHub: [@Akash-boy](https://github.com/Akash-boy)
 
 ## 📊 Project Status
 
-**Current Status:** 🚧 In Active Development
-
-**Completion:** 
-- Order Service: ✅ Complete
-- Payment Service: ✅ 80% Complete
-- Inventory Service: 🚧 In Progress
-- Analytics Service: 📋 Planned
+**Current Status:** ✅ Core Features + Redis Caching Complete
 
 ---
 
 ⭐ If you found this project helpful, please give it a star!
-
-💬 Questions? Feel free to open an issue or reach out!
